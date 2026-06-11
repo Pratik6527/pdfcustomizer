@@ -2,7 +2,7 @@
 Flask Application: Premium Document Cleanup & Rebuilder
 All temp files go to /tmp for Vercel compatibility.
 """
-import os, sys, uuid, tempfile, traceback, time
+import os, sys, uuid, tempfile, traceback, time, json
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -14,7 +14,7 @@ base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 app = Flask(__name__, 
             template_folder=os.path.join(base_dir, "templates"), 
             static_folder=os.path.join(base_dir, "static"))
-app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024  # 64MB hard limit locally
+app.config["MAX_CONTENT_LENGTH"] = int(4.4 * 1024 * 1024)  # 4.4MB for Vercel
 
 # Temp directories (Vercel-safe)
 _TMP = tempfile.gettempdir()
@@ -22,7 +22,8 @@ _UPL = os.path.join(_TMP, "uploads")
 _PRV = os.path.join(_TMP, "previews")
 _OUT = os.path.join(_TMP, "outputs")
 _PGS = os.path.join(_TMP, "pages")
-for d in [_UPL, _PRV, _OUT, _PGS]:
+_GEN = os.path.join(_TMP, "generated")
+for d in [_UPL, _PRV, _OUT, _PGS, _GEN]:
     os.makedirs(d, exist_ok=True)
 
 ALLOWED = {'.pdf', '.png', '.jpg', '.jpeg', '.webp'}
@@ -32,7 +33,7 @@ def auto_cleanup_old_files():
     """Clean files older than 10 mins to prevent No space left on device."""
     try:
         now = time.time()
-        for d in [_UPL, _PRV, _OUT, _PGS]:
+        for d in [_UPL, _PRV, _OUT, _PGS, _GEN]:
             if not os.path.exists(d): continue
             for filename in os.listdir(d):
                 fp = os.path.join(d, filename)
@@ -134,55 +135,133 @@ def upload_file():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/preview-page/<file_id>/<int:page_num>", methods=["GET"])
-def preview_page(file_id, page_num):
-    """Generates a cleanup preview for a single page (Lazy loading)."""
-    try:
-        settings_str = request.args.get("settings", "{}")
-        import json
-        settings = json.loads(settings_str)
 
-        # Look for the original uploaded file
-        # We don't know the exact filename extension, so we must find it
+@app.route("/api/process", methods=["POST"])
+def process_document():
+    """
+    Processes ALL pages of the uploaded document:
+    1. Renders each page as an image.
+    2. Runs visual cleanup on every page.
+    3. Saves each cleaned page as JPEG preview.
+    4. Generates the final optimized PDF.
+    5. Returns download URL + cleanup report.
+    
+    This is the main processing endpoint. 
+    Download button should only be enabled after this returns.
+    """
+    try:
+        payload = ensure_dict(request.get_json(silent=True) or {})
+        file_id = payload.get("file_id")
+        settings = ensure_dict(payload.get("settings", {}))
+
+        if not file_id:
+            return jsonify({
+                "status": "error",
+                "code": "MISSING_FILE_ID",
+                "message": "Missing file_id. Please upload the document again."
+            }), 400
+
+        # Find uploaded file
         upload_files = [f for f in os.listdir(_UPL) if f.startswith(f"{file_id}_")]
         if not upload_files:
-            return jsonify({"status": "expired", "message": "Preview expired. Please upload again."}), 410
-            
+            return jsonify({
+                "status": "error",
+                "code": "FILE_EXPIRED",
+                "message": "File expired. Please re-upload."
+            }), 410
+
         file_path = os.path.join(_UPL, upload_files[0])
-        preview_name = f"prev_{file_id}_p{page_num}.jpg"
-        final_prev_path = os.path.join(_PRV, preview_name)
-        
-        # If the generated image already exists and we aren't explicitly forcing a refresh with new settings, 
-        # we can just return it. However, the user prompt implies: "If page image does not exist: render it".
-        # Actually, if settings changed, we should probably re-render. Let's just re-render.
-        # But wait, if they draw a brush stroke, it modifies the generated image, and we want to return THAT.
-        # So we only generate it if it DOES NOT exist!
-        if not os.path.exists(final_prev_path):
-            from utils.renderer import render_pdf_to_images, load_image_as_page
-            from utils.cleanup_engine import process_cleanup
 
-            # Render only the requested page at 120 DPI for fast preview
-            is_pdf = file_path.lower().endswith(".pdf")
-            if is_pdf:
-                pages = render_pdf_to_images(file_path, dpi=120, specific_page=page_num)
-            else:
-                pages = load_image_as_page(file_path)
+        # Process all pages
+        from utils.cleanup_engine import process_all_pages
+        cleanup_report = process_all_pages(file_path, settings, file_id, _GEN)
 
-            if not pages:
-                return jsonify({"error": "Failed to render page."}), 500
+        if not cleanup_report:
+            return jsonify({
+                "status": "error",
+                "message": "Failed to process any pages."
+            }), 500
 
-            cleaned_pages = process_cleanup(pages, settings)
-            preview_img_path = cleaned_pages[0]["path"]
+        page_count = len(cleanup_report)
 
-            # Save as fast JPEG
-            from PIL import Image
-            Image.open(preview_img_path).convert("RGB").save(final_prev_path, "JPEG", quality=80)
+        # Generate final PDF
+        from utils.pdf_exporter import generate_final_pdf
+        quality_mode = settings.get("export_quality", "smart")
+        out_name = f"final_{file_id}.pdf"
+        out_path = os.path.join(_OUT, out_name)
 
-        return send_file(final_prev_path, mimetype="image/jpeg")
+        cleaned_paths = [r["path"] for r in cleanup_report]
+        success = generate_final_pdf(file_path, cleaned_paths, out_path, quality_mode)
+
+        if not success:
+            return jsonify({
+                "status": "error",
+                "message": "PDF generation failed."
+            }), 500
+
+        orig_size = round(os.path.getsize(file_path) / (1024 * 1024), 2)
+        gen_size = round(os.path.getsize(out_path) / (1024 * 1024), 2)
+
+        return jsonify({
+            "status": "success",
+            "file_id": file_id,
+            "page_count": page_count,
+            "download_url": f"/api/download/{out_name}",
+            "original_size_mb": orig_size,
+            "generated_size_mb": gen_size,
+            "cleanup_report": [
+                {
+                    "page": r["page"],
+                    "watermark_removed": r.get("watermark_removed", False),
+                    "ad_removed": r.get("ad_removed", False),
+                    "content_safe": r.get("content_safe", True),
+                    "status": r.get("status", "unknown")
+                }
+                for r in cleanup_report
+            ]
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "status": "error",
+            "code": "PROCESS_FAILED",
+            "message": f"Server processing error: {str(e)} \n(If it says 'cv2', the server wasn't fully restarted)"
+        }), 500
+
+
+@app.route("/api/preview-page/<file_id>/<int:page_num>", methods=["GET"])
+def preview_page(file_id, page_num):
+    """
+    Serves a pre-generated cleaned page image.
+    Images are created by the /api/process endpoint.
+    Returns the actual JPEG image data — never HTML or JSON for success.
+    """
+    try:
+        # Look for the generated page image
+        gen_file = os.path.join(_GEN, f"gen_{file_id}_p{page_num}.jpg")
+
+        if os.path.exists(gen_file):
+            return send_file(gen_file, mimetype="image/jpeg")
+
+        # Also check legacy preview dir
+        prev_file = os.path.join(_PRV, f"prev_{file_id}_p{page_num}.jpg")
+        if os.path.exists(prev_file):
+            return send_file(prev_file, mimetype="image/jpeg")
+
+        return jsonify({
+            "status": "error",
+            "message": "Preview page not found. Please process the document first."
+        }), 404
 
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+        return jsonify({
+            "status": "error",
+            "message": "Failed to serve preview page."
+        }), 500
+
 
 @app.route("/api/apply-brush", methods=["POST"])
 def apply_brush():
@@ -197,14 +276,17 @@ def apply_brush():
         if not file_id or not points:
             return jsonify({"error": "Missing file_id or points"}), 400
 
-        preview_name = f"prev_{file_id}_p{page}.jpg"
-        final_prev_path = os.path.join(_PRV, preview_name)
+        # Check generated dir first, then preview dir
+        gen_path = os.path.join(_GEN, f"gen_{file_id}_p{page}.jpg")
+        prev_path = os.path.join(_PRV, f"prev_{file_id}_p{page}.jpg")
         
-        if not os.path.exists(final_prev_path):
-            return jsonify({"error": "Page not generated yet"}), 400
+        target_path = gen_path if os.path.exists(gen_path) else prev_path
+        
+        if not os.path.exists(target_path):
+            return jsonify({"error": "Page not generated yet. Please process the document first."}), 400
 
         from utils.inpaint_engine import apply_brush_strokes
-        apply_brush_strokes(final_prev_path, final_prev_path, points, brush_size)
+        apply_brush_strokes(target_path, target_path, points, brush_size)
         
         return jsonify({"status": "success", "affected_pages": [page]})
     except Exception as e:
@@ -234,26 +316,37 @@ def apply_rectangle():
         if apply_mode == "current":
             affected_pages = [page]
         else:
-            # We must apply to all available previews in the folder
-            for filename in os.listdir(_PRV):
-                if filename.startswith(f"prev_{file_id}_p"):
-                    try:
-                        p_num = int(filename.split("_p")[1].split(".jpg")[0])
-                        
-                        if apply_mode == "all":
-                            affected_pages.append(p_num)
-                        elif apply_mode == "range":
-                            from utils.cleanup_engine import _is_page_in_range
-                            if _is_page_in_range(p_num, page_range_str):
-                                affected_pages.append(p_num)
-                    except Exception: pass
+            # Check all generated pages
+            for dirname in [_GEN, _PRV]:
+                if not os.path.exists(dirname):
+                    continue
+                for filename in os.listdir(dirname):
+                    if filename.startswith(f"gen_{file_id}_p") or filename.startswith(f"prev_{file_id}_p"):
+                        try:
+                            p_num = int(filename.split("_p")[1].split(".jpg")[0])
+                            
+                            if apply_mode == "all":
+                                if p_num not in affected_pages:
+                                    affected_pages.append(p_num)
+                            elif apply_mode == "range":
+                                from utils.cleanup_engine import _is_page_in_range
+                                if _is_page_in_range(p_num, page_range_str):
+                                    if p_num not in affected_pages:
+                                        affected_pages.append(p_num)
+                        except Exception: pass
 
         for p_num in affected_pages:
-            final_prev_path = os.path.join(_PRV, f"prev_{file_id}_p{p_num}.jpg")
-            if os.path.exists(final_prev_path):
-                # Manual rect format expects list of rects: [{"box": {"x":..., "y":..., "width":..., "height":...}}]
+            gen_path = os.path.join(_GEN, f"gen_{file_id}_p{p_num}.jpg")
+            prev_path = os.path.join(_PRV, f"prev_{file_id}_p{p_num}.jpg")
+            target_path = gen_path if os.path.exists(gen_path) else prev_path
+            
+            if os.path.exists(target_path):
                 rect_obj = {"box": rect}
-                apply_manual_rects(final_prev_path, final_prev_path, [rect_obj], fill_method=payload.get("fill_method", "white"), inpaint_radius=5)
+                apply_manual_rects(
+                    target_path, target_path, [rect_obj],
+                    fill_method=payload.get("fill_method", "white"),
+                    inpaint_radius=5
+                )
 
         return jsonify({"status": "success", "affected_pages": affected_pages})
     except Exception as e:
@@ -262,6 +355,10 @@ def apply_rectangle():
 
 @app.route('/api/export', methods=['POST'])
 def export_pdf():
+    """
+    Legacy export endpoint — kept for backward compatibility.
+    The new flow uses /api/process which generates the PDF inline.
+    """
     try:
         payload = ensure_dict(request.get_json(silent=True) or {})
         file_id = payload.get("file_id")
@@ -287,7 +384,10 @@ def export_pdf():
 
         quality_mode = settings.get("export_quality", "smart")
         
-        success = smart_hybrid_export(file_path, out_path, settings, quality_mode, file_id=file_id, preview_dir=_PRV)
+        success = smart_hybrid_export(
+            file_path, out_path, settings, quality_mode,
+            file_id=file_id, preview_dir=_GEN
+        )
 
         if not success:
             return jsonify({

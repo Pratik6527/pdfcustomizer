@@ -22,7 +22,7 @@
         <span class="btn-icon">📁</span> Upload Document
       </button>
       <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg,.webp" style="display:none;">
-      <button class="btn btn-success" id="btnDownload" disabled>
+      <button class="btn btn-success" id="btnDownload" disabled data-download-url="">
         <span class="btn-icon">⬇</span> Download PDF
       </button>
     </div>
@@ -52,45 +52,49 @@
 
       <!-- Panel 1: Original Preview (30%) -->
       <section class="preview-panel original-panel" id="originalPanel">
-        <div class="preview-header">
+        <div class="floating-header">
           <div>
             <h3>Original Document</h3>
             <span class="preview-subtitle" id="originalScrollPage">Page 1 / 1</span>
           </div>
-          <div class="preview-actions">
-            <button data-action="zoom-out">−</button>
-            <span class="zoom-value">100%</span>
-            <button data-action="zoom-in">+</button>
-            <button data-action="fit-width">Fit</button>
+        </div>
+        <div class="pages-scroll-viewport" id="originalViewport">
+          <div id="originalPages" class="pages-scroll-content">
+            <div class="placeholder-msg" id="origPlaceholder">
+              <div class="placeholder-icon">📄</div>
+              <p>Upload a file to preview</p>
+            </div>
           </div>
         </div>
-        <div id="originalPages" class="pages-scroll">
-          <div class="placeholder-msg" id="origPlaceholder">
-            <div class="placeholder-icon">📄</div>
-            <p>Upload a file to preview</p>
-          </div>
+        <div class="floating-toolbar">
+          <button data-target="original" data-action="zoom-out" title="Zoom Out">−</button>
+          <span class="zoom-value" id="origZoomText">100%</span>
+          <button data-target="original" data-action="zoom-in" title="Zoom In">+</button>
+          <button data-target="original" data-action="fit-width">Fit</button>
         </div>
       </section>
 
       <!-- Panel 2: Generated Preview (30%) -->
       <section class="preview-panel generated-panel" id="generatedPanel">
-        <div class="preview-header">
+        <div class="floating-header">
           <div>
             <h3>Cleaned Output</h3>
             <span class="preview-subtitle" id="generatedScrollPage">Page 1 / 1</span>
           </div>
-          <div class="preview-actions">
-            <button data-action="zoom-out">−</button>
-            <span class="zoom-value">100%</span>
-            <button data-action="zoom-in">+</button>
-            <button data-action="fit-width">Fit</button>
+        </div>
+        <div class="pages-scroll-viewport" id="generatedViewport">
+          <div id="generatedPages" class="pages-scroll-content">
+            <div class="placeholder-msg" id="genPlaceholder">
+              <div class="placeholder-icon">✨</div>
+              <p>Waiting for processing...</p>
+            </div>
           </div>
         </div>
-        <div id="generatedPages" class="pages-scroll">
-          <div class="placeholder-msg" id="genPlaceholder">
-            <div class="placeholder-icon">✨</div>
-            <p>Waiting for processing...</p>
-          </div>
+        <div class="floating-toolbar">
+          <button data-target="generated" data-action="zoom-out" title="Zoom Out">−</button>
+          <span class="zoom-value" id="genZoomText">100%</span>
+          <button data-target="generated" data-action="zoom-in" title="Zoom In">+</button>
+          <button data-target="generated" data-action="fit-width">Fit</button>
         </div>
       </section>
 

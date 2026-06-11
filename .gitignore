@@ -19,3 +19,11 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Test / Scratch
+scratch/
+*.test.*
+test_*.png
+test_*.pdf
+upload.json
+page.png

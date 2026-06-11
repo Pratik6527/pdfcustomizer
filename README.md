@@ -1,30 +1,73 @@
 # Document Cleanup Tool
 
-A premium web application for authorized PDF/Image watermark cleanup, manual erasing, and document rebuilding. 
+Premium PDF/Image watermark cleanup tool with AI-powered page-by-page visual processing.
 
-## Key Features
-- **Visual Cleanup Mode**: Safely removes faint backgrounds, watermarks, and banners while preserving original content layout, Bengali/Hindi fonts, tables, and spacing.
-- **Manual Erase Mode**: Brush and Rectangle selection tools to easily erase unwanted sections. Changes can be applied to the current page, a specific range, or all pages (e.g. repeated footers).
-- **Foreground Protection**: Automatically protects dark text, colored answers, borders, and lines so that real content is never accidentally erased.
-- **Vercel & Mobile Ready**: 100% stateless backend using `/tmp` storage. Fully responsive UI featuring Glassmorphism, Google Fonts, and a Dual-Pane Preview.
-- **Local PDF Rendering**: Uses PyMuPDF and PDF.js to render your documents cleanly.
+## Features
 
-## Setup Instructions
+- **Visual Watermark Cleanup** — Detects and removes watermarks, background logos, teacher names, phone numbers, ad banners, footer strips
+- **Foreground Protection** — Never erases questions, options, tables, borders, headings, or colored text
+- **Manual Tools** — Rectangle select and brush erase for manual cleanup
+- **Scroll Preview** — Side-by-side original and cleaned preview with scroll-based page navigation
+- **Smart Export** — Optimized PDF output with configurable DPI and compression
 
-1. **Install Dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. **Run Locally**
-   ```bash
-   python api/index.py
-   ```
-   The app will run at `http://localhost:8000/`.
+## Tech Stack
 
-## Deployment to Vercel
-This project is configured out-of-the-box for serverless deployment on Vercel.
-1. Install the Vercel CLI or link via GitHub.
-2. Ensure you deploy the root directory. Vercel will use `vercel.json` to route `/api/*` to the Python backend and serve `/static/*` via edge CDN.
+- **Backend**: Python/Flask + PyMuPDF + OpenCV + Pillow
+- **Frontend**: Vanilla HTML/CSS/JS + PDF.js
+- **Deploy**: Vercel-ready (serverless Python)
 
-## Important Note
-This tool is intended for authorized document editing only. Please verify you own or have permission to modify any uploaded file.
+## Project Structure
+
+```
+├── api/
+│   └── index.py          # Flask app with all API routes
+├── utils/
+│   ├── watermark_detector.py  # Targeted watermark detection
+│   ├── cleanup_engine.py      # Page-by-page cleanup pipeline
+│   ├── pdf_exporter.py        # PDF generation & optimization
+│   ├── inpaint_engine.py      # Pixel-level cleanup (fill/inpaint)
+│   └── renderer.py            # PDF-to-image rendering
+├── static/
+│   ├── css/style.css     # All styles (dark mode, responsive)
+│   ├── js/app.js         # Frontend logic
+│   ├── assets/           # Developer avatar
+│   └── fonts/            # Noto Sans / Bengali fonts
+├── templates/
+│   └── index.html        # Main HTML template
+├── requirements.txt
+├── vercel.json
+└── runtime.txt
+```
+
+## Local Development
+
+```bash
+pip install -r requirements.txt
+python api/index.py
+# Open http://localhost:8000
+```
+
+## Deploy to Vercel
+
+```bash
+vercel deploy
+```
+
+Max upload: 4.4MB (Vercel serverless limit).
+
+## Usage
+
+1. Click "Upload Document"
+2. Confirm document ownership
+3. Configure cleanup settings (watermark, teacher name, footer, ads)
+4. Click "Process Document"
+5. Review cleaned preview (scroll to navigate pages)
+6. Download the clean PDF
+
+## License
+
+For authorized document cleanup only.
+
+---
+
+Developed by **Mr. Pratik Mondal**

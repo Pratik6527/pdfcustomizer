@@ -1,8 +1,11 @@
 """
 PDF Exporter with Smart Hybrid Output
 
-Optimizes export by keeping vector pages unchanged and only replacing/patching
-raster images where necessary. Uses JPEG compression for massive space savings.
+Architecture:
+- generate_final_pdf(): Builds a new PDF from cleaned page images.
+  Uses the original PDF for page dimensions. Never modifies the original in-place.
+- smart_hybrid_export(): Legacy interface that combines render+cleanup+export.
+- File size optimization: JPEG compression, DPI control, post-export compression check.
 """
 import fitz
 import os
@@ -14,108 +17,214 @@ from PIL import Image
 from utils.renderer import render_pdf_to_images, load_image_as_page
 from utils.cleanup_engine import process_cleanup
 
-def smart_hybrid_export(file_path, out_path, settings, quality_mode="smart", file_id=None, preview_dir=None):
+
+def generate_final_pdf(file_path, cleaned_page_paths, out_path, quality_mode="smart"):
     """
-    Exports the PDF using the Hybrid strategy.
-    Instead of rendering every page to PNG, it renders the pages, runs cleanup,
-    and if a page was cleaned, it replaces that page in the original PDF with 
-    a compressed JPEG. If the page was untouched, it retains the original vector page.
+    Builds a new PDF from cleaned page images.
+    
+    Uses the original PDF to determine correct page dimensions.
+    Each cleaned page image is compressed to JPEG and placed onto a
+    correctly-sized blank page.
+    
+    Args:
+        file_path: Path to the original uploaded file (PDF or image)
+        cleaned_page_paths: List of image paths, one per page, in order
+        out_path: Where to save the final PDF
+        quality_mode: 'smart', 'small', 'balanced', 'high', 'ultra'
+    
+    Returns: True on success, False on failure
     """
     try:
+        # Determine JPEG quality based on mode
+        jpeg_quality_map = {
+            "small": 65,
+            "smart": 78,
+            "balanced": 78,
+            "high": 85,
+            "ultra": 95,
+        }
+        jpeg_quality = jpeg_quality_map.get(quality_mode, 78)
+
         is_pdf = file_path.lower().endswith(".pdf")
         
-        # If it's just an image, fallback to simple raster workflow
-        if not is_pdf:
-            pages = load_image_as_page(file_path)
-            cleaned_pages = process_cleanup(pages, settings)
-            cleaned_paths = [p["path"] for p in cleaned_pages]
-            return generate_pdf_from_images(cleaned_paths, out_path, dpi=200)
-
-        doc = fitz.open(file_path)
+        # Get original page dimensions
+        page_dimensions = []
+        if is_pdf:
+            try:
+                orig_doc = fitz.open(file_path)
+                for i in range(len(orig_doc)):
+                    rect = orig_doc[i].rect
+                    page_dimensions.append((rect.width, rect.height))
+                orig_doc.close()
+            except Exception:
+                page_dimensions = []
         
-        # Determine DPI and JPEG Quality based on mode
-        dpi = 150
-        jpeg_quality = 80
+        # If we couldn't get dimensions, fall back to image dimensions
+        if not page_dimensions:
+            for img_path in cleaned_page_paths:
+                try:
+                    img = Image.open(img_path)
+                    # Convert pixel dimensions to points (72 DPI)
+                    # Assuming pages were rendered at 150 DPI
+                    w_pts = img.width * 72 / 150
+                    h_pts = img.height * 72 / 150
+                    page_dimensions.append((w_pts, h_pts))
+                except Exception:
+                    page_dimensions.append((595, 842))  # A4 fallback
         
-        if quality_mode == "small":
-            dpi = 120
-            jpeg_quality = 65
-        elif quality_mode == "balanced":
-            dpi = 150
-            jpeg_quality = 78
-        elif quality_mode == "high":
-            dpi = 200
-            jpeg_quality = 85
-        elif quality_mode == "ultra":
-            dpi = 300
-            jpeg_quality = 95
-
-        # We will iterate through the PDF pages.
-        # If a corresponding generated page exists in preview_dir, it means it was cleaned or edited.
-        # If it doesn't exist, it means the user never even scrolled to it OR it didn't need cleanup.
-        # Wait, if they never scrolled to it, it hasn't been generated yet!
-        # So we MUST run process_cleanup on the untouched pages now just to be safe if auto-settings are on!
+        # Ensure we have dimensions for every page
+        while len(page_dimensions) < len(cleaned_page_paths):
+            page_dimensions.append(page_dimensions[-1] if page_dimensions else (595, 842))
         
-        # Actually, for an accurate export of "all pages", we should process ALL pages here,
-        # but if a page is already in `preview_dir`, we use that one (because it might have manual brush strokes!).
-        pages = render_pdf_to_images(file_path, dpi=dpi)
+        # Build new PDF from scratch
+        doc = fitz.open()
         
-        cleaned_pages = []
-        for p in pages:
-            p_num = p["page_num"]
-            prev_file = os.path.join(preview_dir, f"prev_{file_id}_p{p_num}.jpg") if (preview_dir and file_id) else None
+        for i, img_path in enumerate(cleaned_page_paths):
+            if not os.path.exists(img_path):
+                # Page image missing — skip would violate "never skip a page"
+                # Use a white placeholder page instead
+                pw, ph = page_dimensions[i]
+                doc.new_page(width=pw, height=ph)
+                continue
             
-            if prev_file and os.path.exists(prev_file):
-                # Use the already generated (and potentially brush-edited) preview image!
-                cleaned_pages.append({
-                    "page_num": p_num,
-                    "width": p["width"],
-                    "height": p["height"],
-                    "path": prev_file
-                })
-            else:
-                # Page hasn't been generated/previewed yet. Run it through the auto-cleanup now.
-                cleaned_p = process_cleanup([p], settings)[0]
-                cleaned_pages.append(cleaned_p)
-        
-        # Iterate and replace pages in the PDF ONLY if they were modified
-        for i, (orig, clean) in enumerate(zip(pages, cleaned_pages)):
-            if orig["path"] != clean["path"]:
-                # The page was cleaned/modified!
-                # We need to replace it in the PDF document.
-                
-                # Compress the cleaned PNG to a high-quality JPEG
-                temp_jpg = os.path.join(tempfile.gettempdir(), f"opt_{uuid.uuid4()}.jpg")
-                Image.open(clean["path"]).convert("RGB").save(temp_jpg, "JPEG", quality=jpeg_quality, optimize=True)
-                
-                # Get dimensions of original page to maintain exact sizing
-                page = doc[i]
-                rect = page.rect
-                
-                # Create a new blank page with same dimensions immediately after
-                doc.insert_page(i + 1, width=rect.width, height=rect.height)
-                new_page = doc[i + 1]
-                
-                # Insert the compressed JPEG onto the new page
-                new_page.insert_image(rect, filename=temp_jpg)
-                
-                # Delete the original heavy/dirty page
-                doc.delete_page(i)
-                
-                # Cleanup temp jpg
+            pw, ph = page_dimensions[i]
+            
+            # Compress to JPEG for file size optimization
+            temp_jpg = os.path.join(tempfile.gettempdir(), f"exp_{uuid.uuid4()}.jpg")
+            try:
+                Image.open(img_path).convert("RGB").save(
+                    temp_jpg, "JPEG", quality=jpeg_quality, optimize=True
+                )
+            except Exception:
+                # If JPEG conversion fails, use original image
+                temp_jpg = img_path
+            
+            # Create page with original dimensions
+            page = doc.new_page(width=pw, height=ph)
+            rect = fitz.Rect(0, 0, pw, ph)
+            
+            try:
+                page.insert_image(rect, filename=temp_jpg)
+            except Exception:
+                # Fallback: try with original image
+                try:
+                    page.insert_image(rect, filename=img_path)
+                except Exception:
+                    pass  # Page will be blank but present
+            
+            # Cleanup temp jpg
+            if temp_jpg != img_path:
                 try:
                     os.remove(temp_jpg)
                 except Exception:
                     pass
-
-        # Save and optimize the final document
-        # garbage=4 (Remove unused objects)
-        # deflate=True (Compress streams)
-        # clean=True (Clean and sanitize contents)
+        
+        # Save with optimization
         doc.save(out_path, garbage=4, deflate=True, clean=True)
         doc.close()
         
+        # File size check: if output > input * 1.5, run compression pass
+        if is_pdf and os.path.exists(file_path) and os.path.exists(out_path):
+            orig_size = os.path.getsize(file_path)
+            gen_size = os.path.getsize(out_path)
+            
+            if orig_size > 0 and gen_size > orig_size * 1.5:
+                _compress_pdf(out_path, jpeg_quality=max(55, jpeg_quality - 15))
+        
         return True
+        
+    except Exception as e:
+        print(f"generate_final_pdf error: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def _compress_pdf(pdf_path, jpeg_quality=65):
+    """
+    Additional compression pass on an existing PDF.
+    Re-saves with aggressive garbage collection.
+    """
+    try:
+        doc = fitz.open(pdf_path)
+        temp_path = pdf_path + ".tmp"
+        doc.save(temp_path, garbage=4, deflate=True, clean=True,
+                 linear=True)
+        doc.close()
+        
+        # Replace original with compressed version
+        os.replace(temp_path, pdf_path)
+    except Exception:
+        # If compression fails, keep the original
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception:
+            pass
+
+
+def smart_hybrid_export(file_path, out_path, settings, quality_mode="smart",
+                        file_id=None, preview_dir=None):
+    """
+    Legacy export interface.
+    
+    If preview images exist in preview_dir (from process_all_pages), uses those.
+    Otherwise renders and cleans all pages fresh.
+    """
+    try:
+        is_pdf = file_path.lower().endswith(".pdf")
+        
+        # Determine DPI based on quality mode
+        dpi_map = {
+            "small": 120,
+            "smart": 150,
+            "balanced": 150,
+            "high": 200,
+            "ultra": 300,
+        }
+        dpi = dpi_map.get(quality_mode, 150)
+        
+        # If it's just an image, simple workflow
+        if not is_pdf:
+            pages = load_image_as_page(file_path)
+            cleaned_pages = process_cleanup(pages, settings)
+            cleaned_paths = [p["path"] for p in cleaned_pages]
+            return generate_final_pdf(file_path, cleaned_paths, out_path, quality_mode)
+
+        # For PDFs: check if pre-generated pages exist
+        page_count = 0
+        try:
+            doc = fitz.open(file_path)
+            page_count = len(doc)
+            doc.close()
+        except Exception:
+            page_count = 1
+
+        # Collect cleaned page paths
+        cleaned_paths = []
+        
+        for p_num in range(1, page_count + 1):
+            # Check for pre-generated preview
+            gen_file = None
+            if preview_dir and file_id:
+                gen_file = os.path.join(preview_dir, f"gen_{file_id}_p{p_num}.jpg")
+                if not os.path.exists(gen_file):
+                    gen_file = None
+            
+            if gen_file:
+                cleaned_paths.append(gen_file)
+            else:
+                # Page hasn't been processed — render and clean it now
+                pages = render_pdf_to_images(file_path, dpi=dpi, specific_page=p_num)
+                if pages:
+                    cleaned_p = process_cleanup(pages, settings)
+                    cleaned_paths.append(cleaned_p[0]["path"])
+                else:
+                    # Render failed — use a blank page (will be caught by generate_final_pdf)
+                    cleaned_paths.append("")
+        
+        return generate_final_pdf(file_path, cleaned_paths, out_path, quality_mode)
+        
     except Exception as e:
         print(f"Hybrid export error: {e}")
         import traceback

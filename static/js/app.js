@@ -37,13 +37,14 @@ document.addEventListener('DOMContentLoaded', () => {
   const btnToolRect       = $('btnToolRect');
   const btnToolBrush      = $('btnToolBrush');
   const rngBrushSize      = $('rngBrushSize');
-  const btnUndo           = $('btnUndo');
-  const btnRedo           = $('btnRedo');
-  const btnResetPage      = $('btnResetPage');
 
   const toastContainer    = $('toastContainer');
+  const originalViewport  = $('originalViewport');
   const originalPages     = $('originalPages');
+  const generatedViewport = $('generatedViewport');
   const generatedPages    = $('generatedPages');
+  const progressWrap      = $('progressWrap');
+  const progressBar       = $('progressBar');
 
   // ===== STATE =====
   const appState = {
@@ -51,12 +52,16 @@ document.addEventListener('DOMContentLoaded', () => {
     pageCount: 0,
     originalSizeMb: 0,
     uploadReady: false,
-    processedReady: false
+    processedReady: false,
+    downloadUrl: null
+  };
+
+  const zoomState = {
+    original: 1.0,
+    generated: 1.0
   };
 
   let pendingFile     = null;
-  let debounceTimer   = null;
-  let currentPageNum  = 1;
   let originalPdfDoc  = null;
 
   let activeTool     = "pan"; 
@@ -69,7 +74,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function showToast(message, type = "error") {
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
-    toast.innerHTML = `<span class="toast-icon">${type === 'error' ? '⚠️' : '✅'}</span> <span class="toast-msg">${message}</span>`;
+    toast.innerHTML = `<span class="toast-icon">${type === 'error' ? '⚠️' : type === 'info' ? 'ℹ️' : '✅'}</span> <span class="toast-msg">${message}</span>`;
     toastContainer.appendChild(toast);
     setTimeout(() => toast.classList.add('show'), 10);
     setTimeout(() => {
@@ -106,11 +111,14 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // ===== MODE SWITCHING =====
-  selMode.addEventListener('change', () => {
+  function applyModeVisibility() {
     const mode = selMode.value;
     sectionCleanup.style.display = (mode === 'visual-cleanup' || mode === 'auto-background') ? 'block' : 'none';
     sectionManual.style.display  = (mode === 'manual-erase') ? 'block' : 'none';
-  });
+  }
+  selMode.addEventListener('change', applyModeVisibility);
+  // Initialize on page load
+  applyModeVisibility();
 
   selApplyScope.addEventListener('change', () => {
     inPageRange.style.display = (selApplyScope.value === 'range') ? 'block' : 'none';
@@ -123,7 +131,6 @@ document.addEventListener('DOMContentLoaded', () => {
     btnToolRect.classList.toggle('active', tool === 'rectangle');
     btnToolBrush.classList.toggle('active', tool === 'brush');
     
-    // Update pointer events on all overlays
     document.querySelectorAll(".tool-overlay").forEach(overlay => {
         overlay.style.pointerEvents = (tool === "pan") ? "none" : "auto";
     });
@@ -132,6 +139,25 @@ document.addEventListener('DOMContentLoaded', () => {
   btnToolPan.addEventListener('click', () => setActiveTool('pan'));
   btnToolRect.addEventListener('click', () => setActiveTool('rectangle'));
   btnToolBrush.addEventListener('click', () => setActiveTool('brush'));
+
+  // ===== ZOOM LOGIC =====
+  document.querySelectorAll('.floating-toolbar button').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const target = e.currentTarget.dataset.target;
+      const action = e.currentTarget.dataset.action;
+      if (!target || !action) return;
+
+      const content = $(target + "Pages");
+      const text = target === "original" ? $("origZoomText") : $("genZoomText");
+
+      if (action === "zoom-in") zoomState[target] = Math.min(zoomState[target] + 0.25, 3.0);
+      else if (action === "zoom-out") zoomState[target] = Math.max(zoomState[target] - 0.25, 0.25);
+      else if (action === "fit-width") zoomState[target] = 1.0;
+
+      content.style.transform = `scale(${zoomState[target]})`;
+      text.textContent = Math.round(zoomState[target] * 100) + "%";
+    });
+  });
 
   // ===== OWNERSHIP MODAL =====
   btnUploadNew.addEventListener('click', () => fileInput.click());
@@ -162,13 +188,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if (pendingFile) await handleUpload(pendingFile);
   });
 
-  // ===== UPLOAD & ORIGINAL PREVIEW =====
+  // ===== UPLOAD — ONLY SHOWS ORIGINAL PREVIEW =====
   async function handleUpload(file) {
     if (!file) return;
 
     if (file.size > 4.4 * 1024 * 1024) {
       showToast('File size is too large. Max size is 4.4MB.', 'error');
-      $('fileInput').value = "";
+      fileInput.value = "";
       return;
     }
 
@@ -194,16 +220,22 @@ document.addEventListener('DOMContentLoaded', () => {
         appState.pageCount = data.page_count;
         appState.originalSizeMb = data.original_size_mb || 0;
         appState.uploadReady = true;
-        appState.processedReady = true;
+        appState.processedReady = false;
+        appState.downloadUrl = null;
         
         document.body.dataset.fileId = data.file_id;
-        localStorage.setItem("currentFileId", data.file_id);
-        localStorage.setItem("currentPageCount", String(data.page_count));
-        
-        btnDownload.disabled = false;
+
+        // Download button stays DISABLED until processing completes
+        setDownloadDisabled();
+
+        // Show placeholder in generated panel
+        showGeneratedPlaceholder();
 
         hideLoading();
-        doLivePreview();
+        showToast('Document uploaded. Starting automatic cleanup...', 'success');
+        
+        // AUTOMATICALLY START PROCESSING
+        processDocument();
       } else {
         throw new Error(data.message || 'Upload failed');
       }
@@ -213,12 +245,130 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  btnProcess.addEventListener('click', () => triggerLivePreview());
+  // ===== DOWNLOAD BUTTON STATE =====
+  function setDownloadDisabled() {
+    btnDownload.disabled = true;
+    btnDownload.classList.add('btn-disabled');
+    btnDownload.textContent = '⬇ Download PDF';
+    btnDownload.dataset.downloadUrl = '';
+  }
 
-  function triggerLivePreview() {
-    if (!appState.fileId) return;
-    clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => doLivePreview(), 400);
+  function setDownloadReady(downloadUrl) {
+    appState.downloadUrl = downloadUrl;
+    btnDownload.disabled = false;
+    btnDownload.classList.remove('btn-disabled');
+    btnDownload.innerHTML = '<span class="btn-icon">⬇</span> Download Clean PDF';
+    btnDownload.dataset.downloadUrl = downloadUrl;
+  }
+
+  // ===== GENERATED PANEL PLACEHOLDER =====
+  function showGeneratedPlaceholder() {
+    generatedPages.innerHTML = `
+      <div class="placeholder-msg" id="genPlaceholder">
+        <div class="placeholder-icon">⚡</div>
+        <p>Click "Process Document" to start cleanup</p>
+      </div>
+    `;
+    const counter = $('generatedScrollPage');
+    if (counter) counter.textContent = 'Page 1 / ' + appState.pageCount;
+  }
+
+  // ===== PROCESS DOCUMENT =====
+  btnProcess.addEventListener('click', processDocument);
+
+  async function processDocument() {
+    if (!appState.fileId) {
+      showToast('Please upload a document first.', 'error');
+      return;
+    }
+
+    try {
+      showLoading('Processing all pages...');
+      showProgress(0);
+
+      const settingsObj = getSettingsObject();
+
+      const res = await fetch('/api/process', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          file_id: appState.fileId,
+          settings: settingsObj
+        })
+      });
+      const data = await safeJsonResponse(res);
+
+      if (data.status !== 'success') {
+        throw new Error(data.message || 'Processing failed');
+      }
+
+      // Update state
+      appState.pageCount = data.page_count;
+      appState.processedReady = true;
+
+      // Render all generated pages in the preview panel
+      await renderGeneratedPreviewAllPages(appState.fileId, data.page_count);
+
+      // Enable download button with the URL
+      setDownloadReady(data.download_url);
+
+      hideLoading();
+
+      // Show success with file size info
+      const savedMb = (data.original_size_mb - data.generated_size_mb).toFixed(2);
+      showToast(`Processing complete! ${data.page_count} pages cleaned. Output: ${data.generated_size_mb}MB`, 'success');
+
+      // Show cleanup summary
+      if (data.cleanup_report) {
+        const cleaned = data.cleanup_report.filter(r => r.watermark_removed).length;
+        const safe = data.cleanup_report.filter(r => r.content_safe).length;
+        if (cleaned > 0) {
+          showToast(`${cleaned}/${data.page_count} pages had watermarks removed. ${safe}/${data.page_count} content verified safe.`, 'info');
+        }
+      }
+
+    } catch (err) {
+      hideLoading();
+      showToast('Processing error: ' + err.message, 'error');
+    }
+  }
+
+  // ===== DOWNLOAD HANDLER =====
+  btnDownload.addEventListener('click', () => {
+    const url = appState.downloadUrl || btnDownload.dataset.downloadUrl;
+    if (!url) {
+      showToast('Please process the document first.', 'error');
+      return;
+    }
+    window.location.href = url;
+  });
+
+  // ===== RESET ALL =====
+  if (btnResetAll) {
+    btnResetAll.addEventListener('click', () => {
+      appState.fileId = null;
+      appState.pageCount = 0;
+      appState.uploadReady = false;
+      appState.processedReady = false;
+      appState.downloadUrl = null;
+
+      setDownloadDisabled();
+
+      originalPages.innerHTML = `
+        <div class="placeholder-msg" id="origPlaceholder">
+          <div class="placeholder-icon">📄</div>
+          <p>Upload a file to preview</p>
+        </div>
+      `;
+      generatedPages.innerHTML = `
+        <div class="placeholder-msg" id="genPlaceholder">
+          <div class="placeholder-icon">✨</div>
+          <p>Waiting for processing...</p>
+        </div>
+      `;
+
+      showToast('All settings reset.', 'success');
+    });
   }
 
   // ===== SCROLL PAGE TRACKER =====
@@ -252,48 +402,45 @@ document.addEventListener('DOMContentLoaded', () => {
   let isSyncingLeftScroll = false;
   let isSyncingRightScroll = false;
 
-  originalPages.addEventListener("scroll", function() {
+  originalViewport.addEventListener("scroll", function() {
     if (!isSyncingLeftScroll) {
       isSyncingRightScroll = true;
-      generatedPages.scrollTop = this.scrollTop;
+      generatedViewport.scrollTop = this.scrollTop;
     }
     isSyncingLeftScroll = false;
   });
 
-  generatedPages.addEventListener("scroll", function() {
+  generatedViewport.addEventListener("scroll", function() {
     if (!isSyncingRightScroll) {
       isSyncingLeftScroll = true;
-      originalPages.scrollTop = this.scrollTop;
+      originalViewport.scrollTop = this.scrollTop;
     }
     isSyncingRightScroll = false;
   });
 
-  // ===== GENERATED PREVIEW SHOW =====
+  // ===== SHOW GENERATED PREVIEW PANEL =====
   function showGeneratedPreviewPanel() {
     const panel = document.querySelector(".generated-panel");
-    const container = document.getElementById("generatedPages");
+    const container = $("generatedPages");
 
-    panel.classList.remove("hidden");
-    panel.style.display = "block";
-    panel.style.visibility = "visible";
-    panel.style.opacity = "1";
+    if (panel) {
+      panel.classList.remove("hidden");
+      panel.style.visibility = "visible";
+      panel.style.opacity = "1";
+      // Don't override display — let CSS grid handle it
+    }
 
-    container.classList.remove("hidden");
-    container.style.display = "flex";
-    container.style.visibility = "visible";
-    container.style.opacity = "1";
-
-    panel.scrollIntoView({
-      behavior: "smooth",
-      block: "nearest",
-      inline: "nearest"
-    });
+    if (container) {
+      container.classList.remove("hidden");
+      container.style.visibility = "visible";
+      container.style.opacity = "1";
+    }
   }
 
   // ===== RENDER ALL ORIGINAL PAGES =====
   async function renderAllOriginalPages(url, fmt) {
-    const container = document.getElementById("originalPages");
-    const counter = document.getElementById("originalScrollPage");
+    const container = $("originalPages");
+    const counter = $("originalScrollPage");
 
     if (fmt === 'image') {
       container.innerHTML = "";
@@ -304,6 +451,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const img = document.createElement("img");
       img.src = url;
       img.className = "pdf-page-canvas";
+      img.style.width = "100%";
+      img.style.height = "auto";
       shell.appendChild(img);
       container.appendChild(shell);
       return;
@@ -319,39 +468,149 @@ document.addEventListener('DOMContentLoaded', () => {
 
       for (let pageNumber = 1; pageNumber <= appState.pageCount; pageNumber++) {
         const shell = document.createElement("div");
-        shell.className = "page-shell original-page";
+        shell.className = "page-shell original-page loading"; // Skeleton class
         shell.dataset.page = pageNumber;
+
+        // Set a default size for skeleton
+        shell.style.width = "595px";
+        shell.style.height = "842px";
 
         const canvas = document.createElement("canvas");
         canvas.className = "pdf-page-canvas";
+        canvas.style.opacity = "0"; // Hide until loaded
+        canvas.style.transition = "opacity 0.3s";
 
         shell.appendChild(canvas);
         container.appendChild(shell);
 
         const page = await originalPdfDoc.getPage(pageNumber);
-        const viewport = page.getViewport({ scale: 1.25 });
+        const desiredWidth = container.clientWidth - 40;
+        const defaultViewport = page.getViewport({ scale: 1.0 });
+        const scale = Math.max(1.0, desiredWidth / defaultViewport.width);
+        const viewport = page.getViewport({ scale: scale });
         const ctx = canvas.getContext("2d");
 
         canvas.width = viewport.width;
         canvas.height = viewport.height;
         canvas.style.width = "100%";
         canvas.style.height = "auto";
+        
+        // Remove skeleton constraints once dimensions are known
+        shell.style.width = "fit-content";
+        shell.style.height = "fit-content";
 
         await page.render({
           canvasContext: ctx,
           viewport: viewport
         }).promise;
+
+        shell.classList.remove("loading");
+        canvas.style.opacity = "1";
       }
 
-      setupScrollPageTracker(container, counter, appState.pageCount);
+      setupScrollPageTracker($("originalViewport"), counter, appState.pageCount);
     } catch (err) {
       console.error(err);
       container.innerHTML = `<div class="preview-error">Failed to load original PDF preview.</div>`;
     }
   }
 
-  function getSettingsString() {
-    return encodeURIComponent(JSON.stringify({
+  // ===== RENDER ALL GENERATED PREVIEW PAGES =====
+  async function renderGeneratedPreviewAllPages(fileId, pageCount) {
+    const container = $("generatedPages");
+    const counter = $("generatedScrollPage");
+
+    container.innerHTML = "";
+    counter.textContent = `Page 1 / ${pageCount}`;
+
+    showGeneratedPreviewPanel();
+
+    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
+      const shell = document.createElement("div");
+      shell.className = "page-shell generated-page loading";
+      shell.dataset.page = pageNumber;
+      
+      // Default skeleton size
+      shell.style.width = "595px";
+      shell.style.height = "842px";
+
+      const img = document.createElement("img");
+      img.className = "generated-page-img";
+      img.alt = `Cleaned page ${pageNumber}`;
+      img.loading = "lazy";
+      img.style.opacity = "0";
+      img.style.transition = "opacity 0.3s";
+      img.src = `/api/preview-page/${fileId}/${pageNumber}?t=${Date.now()}`;
+
+      const overlay = document.createElement("canvas");
+      overlay.className = "tool-overlay";
+      overlay.style.pointerEvents = (activeTool === "pan") ? "none" : "auto";
+
+      img.onload = () => {
+        shell.classList.remove("loading");
+        shell.classList.add("loaded");
+        shell.style.width = "fit-content";
+        shell.style.height = "fit-content";
+        img.style.opacity = "1";
+        syncOverlayCanvasSize(img, overlay);
+        attachOverlayEvents(overlay);
+      };
+
+      img.onerror = () => {
+        shell.classList.remove("loading");
+        shell.innerHTML = `
+          <div class="preview-error">
+            <span>Page ${pageNumber} preview failed.</span>
+            <button class="btn btn-ghost retry-btn" onclick="window.__retryGeneratedPage('${fileId}', ${pageNumber}, this)">↻ Retry</button>
+          </div>
+        `;
+      };
+
+      shell.appendChild(img);
+      shell.appendChild(overlay);
+      container.appendChild(shell);
+    }
+
+    setupScrollPageTracker($("generatedViewport"), counter, pageCount);
+  }
+
+  // ===== RETRY FAILED PAGE (exposed globally) =====
+  window.__retryGeneratedPage = function(fileId, pageNumber, btn) {
+    const shell = btn.closest('.page-shell') || btn.closest('.generated-page');
+    if (!shell) return;
+
+    shell.innerHTML = '';
+    const img = document.createElement("img");
+    img.className = "generated-page-img";
+    img.alt = `Cleaned page ${pageNumber}`;
+    img.src = `/api/preview-page/${fileId}/${pageNumber}?t=${Date.now()}`;
+
+    const overlay = document.createElement("canvas");
+    overlay.className = "tool-overlay";
+    overlay.style.pointerEvents = (activeTool === "pan") ? "none" : "auto";
+
+    img.onload = () => {
+      shell.classList.add("loaded");
+      syncOverlayCanvasSize(img, overlay);
+      attachOverlayEvents(overlay);
+    };
+
+    img.onerror = () => {
+      shell.innerHTML = `
+        <div class="preview-error">
+          <span>Page ${pageNumber} preview failed.</span>
+          <button class="btn btn-ghost retry-btn" onclick="window.__retryGeneratedPage('${fileId}', ${pageNumber}, this)">↻ Retry</button>
+        </div>
+      `;
+    };
+
+    shell.appendChild(img);
+    shell.appendChild(overlay);
+  };
+
+  // ===== SETTINGS OBJECT =====
+  function getSettingsObject() {
+    return {
       mode: selMode.value,
       auto_watermark: chkAutoWatermark.checked,
       auto_teacher: chkAutoTeacher.checked,
@@ -360,68 +619,14 @@ document.addEventListener('DOMContentLoaded', () => {
       cleanup_strength: selStrength.value,
       fill_method: selFillMethod.value,
       preserve_foreground: chkPreserveFG.checked,
+      export_quality: selExportQuality.value,
       apply_scope: selApplyScope ? selApplyScope.value : 'current',
       page_range: inPageRange ? inPageRange.value.trim() : ''
-    }));
+    };
   }
 
-  // ===== RENDER ALL GENERATED PAGES =====
-  async function doLivePreview() {
-    const fileId = appState.fileId || document.body.dataset.fileId || localStorage.getItem("currentFileId");
-    if (!fileId) return;
-    
-    showLoading('Generating preview...');
-    try {
-      const container = document.getElementById("generatedPages");
-      const counter = document.getElementById("generatedScrollPage");
-
-      container.innerHTML = "";
-      counter.textContent = `Page 1 / ${appState.pageCount}`;
-      const settingsStr = getSettingsString();
-
-      showGeneratedPreviewPanel();
-
-      for (let pageNumber = 1; pageNumber <= appState.pageCount; pageNumber++) {
-        const shell = document.createElement("div");
-        shell.className = "page-shell generated-page";
-        shell.dataset.page = pageNumber;
-
-        const img = document.createElement("img");
-        img.className = "generated-page-img";
-        img.alt = `Generated page ${pageNumber}`;
-        img.loading = "lazy";
-        img.src = `/api/preview-page/${fileId}/${pageNumber}?settings=${settingsStr}&t=${Date.now()}`;
-
-        const overlay = document.createElement("canvas");
-        overlay.className = "tool-overlay";
-        overlay.style.pointerEvents = (activeTool === "pan") ? "none" : "auto";
-
-        img.onload = () => {
-          shell.classList.add("loaded");
-          syncOverlayCanvasSize(img, overlay);
-          attachOverlayEvents(overlay);
-        };
-
-        img.onerror = () => {
-          shell.innerHTML = `
-            <div class="preview-error">
-              Failed to load page ${pageNumber}
-            </div>
-          `;
-        };
-
-        shell.appendChild(img);
-        shell.appendChild(overlay);
-        container.appendChild(shell);
-      }
-
-      setupScrollPageTracker(container, counter, appState.pageCount);
-
-    } catch (err) {
-      showToast('Preview error: ' + err.message, 'error');
-    } finally {
-      hideLoading();
-    }
+  function getSettingsString() {
+    return encodeURIComponent(JSON.stringify(getSettingsObject()));
   }
 
   // ===== DRAWING ENGINE (POINTER EVENTS) =====
@@ -570,11 +775,10 @@ document.addEventListener('DOMContentLoaded', () => {
       refreshGeneratedPages(data.affected_pages || [pageNumber]);
     } catch (err) {
       showToast(err.message, 'error');
-      // clear overlay
       const shell = document.querySelector(`.generated-page[data-page="${pageNumber}"]`);
       if (shell) {
         const overlay = shell.querySelector(".tool-overlay");
-        overlay.getContext('2d').clearRect(0,0,overlay.width,overlay.height);
+        if (overlay) overlay.getContext('2d').clearRect(0,0,overlay.width,overlay.height);
       }
     } finally {
       hideLoading();
@@ -601,11 +805,10 @@ document.addEventListener('DOMContentLoaded', () => {
       refreshGeneratedPages(data.affected_pages || [pageNumber]);
     } catch (err) {
       showToast(err.message, 'error');
-      // clear overlay
       const shell = document.querySelector(`.generated-page[data-page="${pageNumber}"]`);
       if (shell) {
         const overlay = shell.querySelector(".tool-overlay");
-        overlay.getContext('2d').clearRect(0,0,overlay.width,overlay.height);
+        if (overlay) overlay.getContext('2d').clearRect(0,0,overlay.width,overlay.height);
       }
     } finally {
       hideLoading();
@@ -613,68 +816,40 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function refreshGeneratedPages(pageNumbers) {
-    const settingsStr = getSettingsString();
     pageNumbers.forEach(num => {
       const shell = document.querySelector(`.generated-page[data-page="${num}"]`);
       if (shell) {
         const img = shell.querySelector(".generated-page-img");
         const overlay = shell.querySelector(".tool-overlay");
-        img.src = `/api/preview-page/${appState.fileId}/${num}?settings=${settingsStr}&t=${Date.now()}`;
+        if (img) img.src = `/api/preview-page/${appState.fileId}/${num}?t=${Date.now()}`;
         if (overlay) overlay.getContext('2d').clearRect(0,0,overlay.width,overlay.height);
       }
     });
   }
 
-  // ===== EXPORT =====
-  async function exportPdf() {
-    try {
-      const fileId = appState.fileId || document.body.dataset.fileId || localStorage.getItem("currentFileId");
-      if (!fileId) {
-        showToast("Please upload and process a document before downloading.", "error");
-        return;
+  // ===== HELPERS =====
+  function showLoading(msg) {
+    loadingMsg.textContent = msg;
+    loadingOverlay.classList.add('active');
+  }
+
+  function hideLoading() {
+    loadingOverlay.classList.remove('active');
+    hideProgress();
+  }
+
+  function showProgress(percent) {
+    if (progressWrap) {
+      progressWrap.style.display = 'block';
+      if (progressBar) {
+        progressBar.style.width = percent + '%';
       }
-
-      showLoading("Preparing optimized PDF...");
-
-      // Settings format
-      const settingsStr = getSettingsString();
-      const settingsRaw = JSON.parse(decodeURIComponent(settingsStr));
-      settingsRaw.export_quality = selExportQuality.value; // add the export quality
-
-      const response = await fetch("/api/export", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          file_id: fileId,
-          page_count: appState.pageCount,
-          settings: settingsRaw
-        })
-      });
-
-      const data = await safeJsonResponse(response);
-
-      if (data.status !== "success") {
-        throw new Error(data.message || "Export failed");
-      }
-
-      hideLoading();
-
-      if (!data.download_url) {
-        throw new Error("Export completed but download URL is missing.");
-      }
-
-      window.location.href = data.download_url;
-    } catch (error) {
-      hideLoading();
-      showToast(error.message, "error");
     }
   }
 
-  btnDownload.addEventListener("click", exportPdf);
-
-  // ===== HELPERS =====
-  function showLoading(msg) { loadingMsg.textContent = msg; loadingOverlay.classList.add('active'); }
-  function hideLoading() { loadingOverlay.classList.remove('active'); }
+  function hideProgress() {
+    if (progressWrap) {
+      progressWrap.style.display = 'none';
+    }
+  }
 });

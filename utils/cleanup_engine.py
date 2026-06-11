@@ -6,11 +6,12 @@ CRITICAL SAFETY:
 2. Content integrity check runs after cleanup.
 3. If cleanup damages content (>5% foreground lost), original page is restored.
 4. Blank pages are never output.
-5. All pages are processed.
+5. All pages are processed — no page is ever skipped.
 """
 import os
 import uuid
 import tempfile
+import shutil
 import cv2
 import numpy as np
 
@@ -18,29 +19,167 @@ from utils.watermark_detector import detect_watermarks, detect_foreground_mask
 from utils.inpaint_engine import apply_safe_cleanup, apply_manual_rects
 
 
+def process_all_pages(file_path, settings, file_id, preview_dir):
+    """
+    Master function: processes ALL pages of a PDF/image.
+    
+    1. Renders every page as an image.
+    2. Runs visual cleanup on each page.
+    3. Saves each cleaned page as JPEG in preview_dir.
+    4. Returns a cleanup report for every page.
+    
+    Returns: list of dicts [{page, path, watermark_removed, ad_removed, content_safe}]
+    """
+    from utils.renderer import render_pdf_to_images, load_image_as_page
+    
+    os.makedirs(preview_dir, exist_ok=True)
+    
+    is_pdf = file_path.lower().endswith(".pdf")
+    
+    # Render all pages at 150 DPI for cleanup
+    dpi = 150
+    if is_pdf:
+        pages = render_pdf_to_images(file_path, dpi=dpi)
+    else:
+        pages = load_image_as_page(file_path)
+    
+    if not pages:
+        return []
+    
+    # Process each page
+    cleanup_report = []
+    
+    for page in pages:
+        page_num = page["page_num"]
+        src_path = page["path"]
+        
+        # Output path in preview dir
+        out_filename = f"gen_{file_id}_p{page_num}.jpg"
+        out_path = os.path.join(preview_dir, out_filename)
+        
+        # Run cleanup
+        result = _cleanup_single_page(src_path, out_path, settings, page)
+        result["page"] = page_num
+        result["path"] = out_path
+        
+        cleanup_report.append(result)
+    
+    return cleanup_report
+
+
+def _cleanup_single_page(src_path, out_path, settings, page_info):
+    """
+    Cleans a single page image. Returns a report dict.
+    """
+    from PIL import Image
+    
+    mode = settings.get("mode", "visual-cleanup")
+    auto_watermark = settings.get("auto_watermark", True)
+    auto_teacher = settings.get("auto_teacher", True)
+    auto_footer = settings.get("auto_footer", True)
+    auto_ad = settings.get("auto_ad", True)
+    fill_method = settings.get("fill_method", "white")
+    strength = settings.get("cleanup_strength", "medium")
+    preserve_fg = settings.get("preserve_foreground", True)
+
+    # Strength → threshold mapping
+    strength_map = {
+        "low":    {"thresh_lo": 210, "thresh_hi": 245, "inpaint_radius": 3},
+        "medium": {"thresh_lo": 190, "thresh_hi": 242, "inpaint_radius": 5},
+        "high":   {"thresh_lo": 170, "thresh_hi": 240, "inpaint_radius": 7},
+        "ultra":  {"thresh_lo": 150, "thresh_hi": 245, "inpaint_radius": 10},
+    }
+    params = strength_map.get(strength, strength_map["medium"])
+
+    report = {
+        "watermark_removed": False,
+        "ad_removed": False,
+        "content_safe": True,
+        "status": "original"
+    }
+
+    did_cleanup = False
+    temp_out = os.path.join(tempfile.gettempdir(), f"tmp_clean_{uuid.uuid4()}.png")
+
+    # ===== AUTO CLEANUP =====
+    if mode in ("visual-cleanup", "auto-background"):
+        if auto_watermark or auto_teacher or auto_footer or auto_ad:
+            safe_mask, fg_count = detect_watermarks(
+                src_path,
+                thresh_lo=params["thresh_lo"],
+                thresh_hi=params["thresh_hi"],
+                protect_dark=True,
+                detect_ad=auto_ad,
+                detect_footer=auto_footer,
+                detect_teacher=auto_teacher,
+                preserve_colored=preserve_fg
+            )
+
+            if safe_mask is not None and cv2.countNonZero(safe_mask) > 0:
+                apply_safe_cleanup(
+                    src_path, temp_out, safe_mask,
+                    fill_method=fill_method,
+                    inpaint_radius=params["inpaint_radius"]
+                )
+
+                # === CONTENT INTEGRITY CHECK ===
+                if not verify_content_integrity(src_path, temp_out, fg_count):
+                    # Cleanup damaged content — restore original
+                    shutil.copy2(src_path, temp_out)
+                    report["content_safe"] = False
+                    report["status"] = "cleanup_rejected_to_protect_content"
+                else:
+                    report["watermark_removed"] = True
+                    report["ad_removed"] = auto_ad
+                    report["status"] = "cleaned"
+
+                did_cleanup = True
+
+    # Save final result as JPEG
+    if did_cleanup and os.path.exists(temp_out):
+        # Final blank-page safety check
+        if _is_page_blank(temp_out):
+            # Restore original — never output blank page
+            Image.open(src_path).convert("RGB").save(out_path, "JPEG", quality=82)
+            report["status"] = "blank_rejected_restored_original"
+            report["content_safe"] = True
+        else:
+            Image.open(temp_out).convert("RGB").save(out_path, "JPEG", quality=82)
+    else:
+        # No cleanup needed — save original as JPEG
+        Image.open(src_path).convert("RGB").save(out_path, "JPEG", quality=82)
+        report["status"] = "no_cleanup_needed"
+
+    # Cleanup temp file
+    try:
+        if os.path.exists(temp_out):
+            os.remove(temp_out)
+    except Exception:
+        pass
+
+    return report
+
+
 def process_cleanup(pages, settings):
     """
-    Takes page dicts and settings. Returns cleaned page dicts.
-    Default mode: visual cleanup with foreground protection.
-    Processes every page.
+    Legacy interface: Takes page dicts and settings. Returns cleaned page dicts.
+    Used by manual brush/rect operations.
     """
     out_dir = os.path.join(tempfile.gettempdir(), "outputs")
     os.makedirs(out_dir, exist_ok=True)
 
-    mode             = settings.get("mode", "visual-cleanup")
-    auto_watermark   = settings.get("auto_watermark", True)
-    auto_teacher     = settings.get("auto_teacher", True)
-    auto_footer      = settings.get("auto_footer", True)
-    auto_ad          = settings.get("auto_ad", True)
-    
-    fill_method      = settings.get("fill_method", "white")
-    strength         = settings.get("cleanup_strength", "medium")
-    preserve_fg      = settings.get("preserve_foreground", True)
-    manual_rects     = settings.get("manual_rects", [])
-    apply_scope      = settings.get("apply_scope", "current")
-    page_range_str   = settings.get("page_range", "")
+    mode = settings.get("mode", "visual-cleanup")
+    auto_watermark = settings.get("auto_watermark", True)
+    auto_teacher = settings.get("auto_teacher", True)
+    auto_footer = settings.get("auto_footer", True)
+    auto_ad = settings.get("auto_ad", True)
+    fill_method = settings.get("fill_method", "white")
+    strength = settings.get("cleanup_strength", "medium")
+    preserve_fg = settings.get("preserve_foreground", True)
+    manual_rects = settings.get("manual_rects", [])
+    apply_scope = settings.get("apply_scope", "current")
+    page_range_str = settings.get("page_range", "")
 
-    # Strength → threshold mapping (higher strength = wider range)
     strength_map = {
         "low":    {"thresh_lo": 210, "thresh_hi": 245, "inpaint_radius": 3},
         "medium": {"thresh_lo": 190, "thresh_hi": 242, "inpaint_radius": 5},
@@ -71,22 +210,18 @@ def process_cleanup(pages, settings):
                 )
 
                 if safe_mask is not None and cv2.countNonZero(safe_mask) > 0:
-                    # Apply cleanup ONLY to the safe_mask
                     apply_safe_cleanup(
                         src_path, out_path, safe_mask,
                         fill_method=fill_method,
                         inpaint_radius=params["inpaint_radius"]
                     )
 
-                    # === CRITICAL: CONTENT INTEGRITY CHECK ===
-                    # If we lost more than 5% of foreground, reject the cleanup.
                     if not verify_content_integrity(src_path, out_path, fg_count):
-                        import shutil
                         shutil.copy2(src_path, out_path)
-                    
+
                     did_cleanup = True
 
-        # ===== MANUAL ERASE MODE =====
+        # ===== MANUAL ERASE =====
         if manual_rects:
             should_apply = False
             if apply_scope == "all":
@@ -106,9 +241,7 @@ def process_cleanup(pages, settings):
                     preserve_foreground=preserve_fg
                 )
 
-                # Integrity check on manual cleanup too
                 if not verify_content_integrity(src_path, manual_out, None):
-                    import shutil
                     shutil.copy2(src_path, manual_out)
 
                 out_path = manual_out
@@ -118,7 +251,6 @@ def process_cleanup(pages, settings):
         if not did_cleanup:
             cleaned_pages.append(page)
         else:
-            # Final blank-page safety check
             if _is_page_blank(out_path):
                 cleaned_pages.append(page)  # Restore original
             else:
