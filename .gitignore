@@ -1,0 +1,21 @@
+# Virtual Environments
+venv/
+env/
+.venv/
+.env
+
+# Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Vercel
+.vercel/
+
+# IDE
+.vscode/
+.idea/

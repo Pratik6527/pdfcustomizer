@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Premium Document Cleanup & Rebuilder</title>
+  <meta name="description" content="Authorized PDF/Image watermark cleanup, manual erase, and AI document rebuilder tool.">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Poppins:wght@400;500;600;700;800&family=Noto+Sans:wght@400;500;600;700;800&family=Noto+Serif:wght@400;500;600;700&family=Noto+Sans+Bengali:wght@400;500;600;700;800&family=Noto+Sans+Devanagari:wght@400;500;600;700;800&family=Roboto+Slab:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-left">
+      <div class="logo-icon">📄</div>
+      <h1 class="logo-text">Document Cleanup Tool</h1>
+    </div>
+    <div class="header-right">
+      <button class="btn btn-accent" id="btnUploadNew">
+        <span class="btn-icon">📁</span> Upload Document
+      </button>
+      <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg,.webp" style="display:none;">
+      <button class="btn btn-success" id="btnDownload" disabled>
+        <span class="btn-icon">⬇</span> Download PDF
+      </button>
+    </div>
+  </header>
+
+  <!-- Ownership Modal -->
+  <div id="ownershipModal" class="modal-overlay">
+    <div class="modal-card">
+      <div class="modal-icon">🔒</div>
+      <h3>Document Ownership Confirmation</h3>
+      <p class="modal-desc">This tool is only for documents you own or have permission to edit. Do not use it for unauthorized copyright removal.</p>
+      <label class="checkbox-label">
+        <input type="checkbox" id="chkOwnership">
+        <span class="checkmark"></span>
+        <span>I confirm that I own this file or have permission to clean/edit/remove marks from it.</span>
+      </label>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="btnCancelUpload">Cancel</button>
+        <button class="btn btn-accent" id="btnConfirmUpload" disabled>Proceed</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main Layout: 30% | 30% | 40% -->
+  <div class="main-container">
+    <div class="preview-grid" id="previewGrid">
+
+      <!-- Panel 1: Original Preview (30%) -->
+      <section class="preview-panel original-panel" id="originalPanel">
+        <div class="preview-header">
+          <div>
+            <h3>Original Document</h3>
+            <span class="preview-subtitle" id="originalScrollPage">Page 1 / 1</span>
+          </div>
+          <div class="preview-actions">
+            <button data-action="zoom-out">−</button>
+            <span class="zoom-value">100%</span>
+            <button data-action="zoom-in">+</button>
+            <button data-action="fit-width">Fit</button>
+          </div>
+        </div>
+        <div id="originalPages" class="pages-scroll">
+          <div class="placeholder-msg" id="origPlaceholder">
+            <div class="placeholder-icon">📄</div>
+            <p>Upload a file to preview</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Panel 2: Generated Preview (30%) -->
+      <section class="preview-panel generated-panel" id="generatedPanel">
+        <div class="preview-header">
+          <div>
+            <h3>Cleaned Output</h3>
+            <span class="preview-subtitle" id="generatedScrollPage">Page 1 / 1</span>
+          </div>
+          <div class="preview-actions">
+            <button data-action="zoom-out">−</button>
+            <span class="zoom-value">100%</span>
+            <button data-action="zoom-in">+</button>
+            <button data-action="fit-width">Fit</button>
+          </div>
+        </div>
+        <div id="generatedPages" class="pages-scroll">
+          <div class="placeholder-msg" id="genPlaceholder">
+            <div class="placeholder-icon">✨</div>
+            <p>Waiting for processing...</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Panel 3: Customization (40%) -->
+      <div class="customization-panel" id="customPanel">
+        <div class="panel-header">
+          <h3>Settings & Export</h3>
+        </div>
+        <div class="settings-scroll">
+
+          <!-- Mode Selector -->
+          <div class="settings-section">
+            <h4 class="section-title">Processing Mode</h4>
+            <select id="selMode" class="ctrl-select">
+              <option value="visual-cleanup" selected>Visual Watermark Cleanup (Default)</option>
+              <option value="manual-erase">Manual Erase Mode</option>
+            </select>
+          </div>
+
+          <!-- Auto Cleanup Toggles -->
+          <div class="settings-section" id="sectionCleanup">
+            <h4 class="section-title">Auto Cleanup Targets</h4>
+            <label class="checkbox-label">
+              <input type="checkbox" id="chkAutoWatermark" checked>
+              <span class="checkmark"></span>
+              <span>Remove Center Watermark / Background</span>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="chkAutoTeacher" checked>
+              <span class="checkmark"></span>
+              <span>Remove Repeated Teacher Name</span>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="chkAutoFooter" checked>
+              <span class="checkmark"></span>
+              <span>Remove Repeated Footer/Banner</span>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="chkAutoAd" checked>
+              <span class="checkmark"></span>
+              <span>Remove Advertisement Image</span>
+            </label>
+
+            <h4 class="section-title mt-2">Cleanup Settings</h4>
+            <label class="checkbox-label">
+              <input type="checkbox" id="chkPreserveForeground" checked>
+              <span class="checkmark"></span>
+              <span>Preserve Foreground Text (Colors, Tables, etc.)</span>
+            </label>
+            <label class="ctrl-label">Cleanup Strength</label>
+            <select id="selStrength" class="ctrl-select">
+              <option value="low">Low</option>
+              <option value="medium" selected>Medium</option>
+              <option value="high">High</option>
+              <option value="ultra">Ultra</option>
+            </select>
+            <label class="ctrl-label">Fill Method</label>
+            <select id="selFillMethod" class="ctrl-select">
+              <option value="white" selected>White Fill</option>
+              <option value="background">Background Match</option>
+              <option value="inpaint">Inpaint</option>
+              <option value="blur">Smooth Blur Blend</option>
+            </select>
+          </div>
+
+          <!-- Manual Erase Tools -->
+          <div class="settings-section" id="sectionManual">
+            <h4 class="section-title">Manual Cleanup Tools</h4>
+            <div class="tool-row">
+              <button class="btn btn-tool active" id="btnToolPan" title="Pan / Scroll">✋ Pan</button>
+              <button class="btn btn-tool" id="btnToolRect" title="Rectangle Selection">▭ Rect</button>
+              <button class="btn btn-tool" id="btnToolBrush" title="Brush Erase">🖌 Brush</button>
+            </div>
+            <label class="ctrl-label">Brush Size</label>
+            <input type="range" id="rngBrushSize" min="5" max="80" value="20" class="ctrl-range">
+            <label class="ctrl-label mt-2">Apply To</label>
+            <select id="selApplyScope" class="ctrl-select">
+              <option value="current">Current Page Only</option>
+              <option value="all">All Pages (Same Area)</option>
+              <option value="range">Page Range</option>
+            </select>
+            <input type="text" id="inPageRange" class="ctrl-input" placeholder="e.g. 1-5, 8, 10-12" style="display:none;">
+          </div>
+
+          <!-- Output Settings -->
+          <div class="settings-section">
+            <h4 class="section-title">Export Settings</h4>
+            <label class="ctrl-label">Export Quality</label>
+            <select id="selExportQuality" class="ctrl-select">
+              <option value="smart" selected>Smart Optimized (Default)</option>
+              <option value="small">Small File (Strong Compression)</option>
+              <option value="balanced">Balanced (150 DPI)</option>
+              <option value="high">High Quality (200 DPI)</option>
+              <option value="ultra">Ultra Quality (300 DPI)</option>
+            </select>
+          </div>
+
+          <!-- Actions -->
+          <div class="settings-section">
+            <button class="btn btn-accent btn-block" id="btnProcess">
+              ⚡ Process Document
+            </button>
+            <button class="btn btn-ghost btn-block mt-2" id="btnResetAll">
+              ⟳ Reset All Settings
+            </button>
+          </div>
+
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Developer Footer -->
+  <footer class="developer-footer">
+    <img src="/static/assets/Mypic.jpeg" alt="Mr. Pratik Mondal" class="developer-avatar" onerror="this.style.display='none';">
+    <span class="developer-name">Developed by Mr. Pratik Mondal</span>
+  </footer>
+
+  <!-- Loading Overlay -->
+  <div class="loading-overlay" id="loadingOverlay">
+    <div class="spinner-ring"></div>
+    <p class="loading-msg" id="loadingMsg">Processing document...</p>
+    <div class="progress-bar-wrap" id="progressWrap" style="display:none;">
+      <div class="progress-bar" id="progressBar"></div>
+    </div>
+  </div>
+
+  <!-- Premium Toast Container -->
+  <div id="toastContainer" class="toast-container"></div>
+
+  <!-- Mobile Sticky Download Bar -->
+  <div id="mobileActionArea" class="mobile-action-bar" style="display: none;"></div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
