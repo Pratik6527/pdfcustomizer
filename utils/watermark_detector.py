@@ -59,8 +59,8 @@ def detect_foreground_mask(img, preserve_colored=True):
     v_lines = cv2.morphologyEx(dark_mask, cv2.MORPH_OPEN, v_kernel)
     mask = cv2.bitwise_or(mask, v_lines)
 
-    # 4. Dilate the foreground mask by 5px to create a strict safety buffer
-    dilate_kernel = np.ones((5, 5), np.uint8)
+    # 4. Dilate the foreground mask by 7px to create a strict safety buffer
+    dilate_kernel = np.ones((7, 7), np.uint8)
     mask = cv2.dilate(mask, dilate_kernel, iterations=1)
 
     return mask
@@ -78,9 +78,10 @@ def _detect_faint_watermark(gray, thresh_lo, thresh_hi, min_blob_area=3000):
     # Target the faint watermark range
     faint_mask = cv2.inRange(gray, thresh_lo, thresh_hi)
 
-    # Use morphological closing to connect nearby faint pixels into blobs
-    close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-    faint_mask = cv2.morphologyEx(faint_mask, cv2.MORPH_CLOSE, close_kernel, iterations=2)
+    # Use a LARGE morphological closing to connect nearby faint pixels into blobs
+    # This specifically targets large, sparse watermarks
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+    faint_mask = cv2.morphologyEx(faint_mask, cv2.MORPH_CLOSE, close_kernel, iterations=3)
 
     # Filter out small noise — keep only large connected blobs
     contours, _ = cv2.findContours(faint_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -90,7 +91,6 @@ def _detect_faint_watermark(gray, thresh_lo, thresh_hi, min_blob_area=3000):
             cv2.drawContours(filtered_mask, [cnt], -1, 255, -1)
 
     return filtered_mask
-
 
 def _detect_background_logo(gray, img_h, img_w):
     """

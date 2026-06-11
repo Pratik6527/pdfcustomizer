@@ -198,6 +198,22 @@ def process_document():
                 "status": "error",
                 "message": "PDF generation failed."
             }), 500
+        import base64
+        
+        # Read PDF as base64 for Vercel statelessness
+        pdf_base64 = ""
+        if os.path.exists(out_path):
+            with open(out_path, "rb") as f:
+                pdf_base64 = base64.b64encode(f.read()).decode('utf-8')
+                
+        # Read previews as base64
+        previews_base64 = []
+        for r in cleanup_report:
+            if os.path.exists(r["path"]):
+                with open(r["path"], "rb") as f:
+                    previews_base64.append(base64.b64encode(f.read()).decode('utf-8'))
+            else:
+                previews_base64.append("")
 
         orig_size = round(os.path.getsize(file_path) / (1024 * 1024), 2)
         gen_size = round(os.path.getsize(out_path) / (1024 * 1024), 2)
@@ -207,6 +223,7 @@ def process_document():
             "file_id": file_id,
             "page_count": page_count,
             "download_url": f"/api/download/{out_name}",
+            "pdf_base64": pdf_base64,
             "original_size_mb": orig_size,
             "generated_size_mb": gen_size,
             "cleanup_report": [
@@ -215,9 +232,10 @@ def process_document():
                     "watermark_removed": r.get("watermark_removed", False),
                     "ad_removed": r.get("ad_removed", False),
                     "content_safe": r.get("content_safe", True),
-                    "status": r.get("status", "unknown")
+                    "status": r.get("status", "unknown"),
+                    "image_base64": b64
                 }
-                for r in cleanup_report
+                for r, b64 in zip(cleanup_report, previews_base64)
             ]
         })
 

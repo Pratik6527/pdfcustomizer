@@ -305,12 +305,25 @@ document.addEventListener('DOMContentLoaded', () => {
       // Update state
       appState.pageCount = data.page_count;
       appState.processedReady = true;
-
       // Render all generated pages in the preview panel
-      await renderGeneratedPreviewAllPages(appState.fileId, data.page_count);
+      await renderGeneratedPreviewAllPages(appState.fileId, data.page_count, data.cleanup_report);
 
-      // Enable download button with the URL
-      setDownloadReady(data.download_url);
+      // Construct a Blob URL from the base64 PDF (Vercel stateless workaround)
+      if (data.pdf_base64) {
+        const byteCharacters = atob(data.pdf_base64);
+        const byteNumbers = new Array(byteCharacters.length);
+        for (let i = 0; i < byteCharacters.length; i++) {
+          byteNumbers[i] = byteCharacters.charCodeAt(i);
+        }
+        const byteArray = new Uint8Array(byteNumbers);
+        const blob = new Blob([byteArray], {type: 'application/pdf'});
+        const blobUrl = URL.createObjectURL(blob);
+
+        // Enable download button with the URL
+        setDownloadReady(blobUrl);
+      } else {
+        setDownloadReady(data.download_url); // Fallback
+      }
 
       hideLoading();
 
@@ -340,7 +353,12 @@ document.addEventListener('DOMContentLoaded', () => {
       showToast('Please process the document first.', 'error');
       return;
     }
-    window.location.href = url;
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `cleaned_${appState.fileId || 'document'}.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
   });
 
   // ===== RESET ALL =====
@@ -516,7 +534,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // ===== RENDER ALL GENERATED PREVIEW PAGES =====
-  async function renderGeneratedPreviewAllPages(fileId, pageCount) {
+  async function renderGeneratedPreviewAllPages(fileId, pageCount, cleanupReport) {
     const container = $("generatedPages");
     const counter = $("generatedScrollPage");
 
@@ -525,7 +543,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     showGeneratedPreviewPanel();
 
-    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
+    for (let i = 0; i < pageCount; i++) {
+      const pageNumber = i + 1;
+      const report = cleanupReport[i];
+      const base64Data = report ? report.image_base64 : "";
+
       const shell = document.createElement("div");
       shell.className = "page-shell generated-page loading";
       shell.dataset.page = pageNumber;
@@ -540,7 +562,12 @@ document.addEventListener('DOMContentLoaded', () => {
       img.loading = "lazy";
       img.style.opacity = "0";
       img.style.transition = "opacity 0.3s";
-      img.src = `/api/preview-page/${fileId}/${pageNumber}?t=${Date.now()}`;
+      
+      if (base64Data) {
+        img.src = "data:image/jpeg;base64," + base64Data;
+      } else {
+        img.src = "";
+      }
 
       const overlay = document.createElement("canvas");
       overlay.className = "tool-overlay";
@@ -561,7 +588,6 @@ document.addEventListener('DOMContentLoaded', () => {
         shell.innerHTML = `
           <div class="preview-error">
             <span>Page ${pageNumber} preview failed.</span>
-            <button class="btn btn-ghost retry-btn" onclick="window.__retryGeneratedPage('${fileId}', ${pageNumber}, this)">↻ Retry</button>
           </div>
         `;
       };
@@ -573,40 +599,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     setupScrollPageTracker($("generatedViewport"), counter, pageCount);
   }
-
-  // ===== RETRY FAILED PAGE (exposed globally) =====
-  window.__retryGeneratedPage = function(fileId, pageNumber, btn) {
-    const shell = btn.closest('.page-shell') || btn.closest('.generated-page');
-    if (!shell) return;
-
-    shell.innerHTML = '';
-    const img = document.createElement("img");
-    img.className = "generated-page-img";
-    img.alt = `Cleaned page ${pageNumber}`;
-    img.src = `/api/preview-page/${fileId}/${pageNumber}?t=${Date.now()}`;
-
-    const overlay = document.createElement("canvas");
-    overlay.className = "tool-overlay";
-    overlay.style.pointerEvents = (activeTool === "pan") ? "none" : "auto";
-
-    img.onload = () => {
-      shell.classList.add("loaded");
-      syncOverlayCanvasSize(img, overlay);
-      attachOverlayEvents(overlay);
-    };
-
-    img.onerror = () => {
-      shell.innerHTML = `
-        <div class="preview-error">
-          <span>Page ${pageNumber} preview failed.</span>
-          <button class="btn btn-ghost retry-btn" onclick="window.__retryGeneratedPage('${fileId}', ${pageNumber}, this)">↻ Retry</button>
-        </div>
-      `;
-    };
-
-    shell.appendChild(img);
-    shell.appendChild(overlay);
-  };
 
   // ===== SETTINGS OBJECT =====
   function getSettingsObject() {
