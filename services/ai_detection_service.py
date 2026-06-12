@@ -99,14 +99,14 @@ def detect_with_gemini(image_path: str, api_key: str) -> dict:
         logger.error(f"Gemini error: {e}")
         return None
 
-def detect_watermarks_ai(image_path: str, provider: str = "hybrid") -> dict:
+def detect_watermarks_ai(image_path: str, provider: str = "hybrid", custom_openai_key: str = "", custom_gemini_key: str = "") -> dict:
     """
     Main entry point for AI detection.
     Provider can be: "openai", "gemini", or "hybrid".
     Hybrid will try OpenAI first, fallback to Gemini.
     """
-    openai_key = get_openai_api_key()
-    gemini_key = get_gemini_api_key()
+    openai_key = custom_openai_key if custom_openai_key else get_openai_api_key()
+    gemini_key = custom_gemini_key if custom_gemini_key else get_gemini_api_key()
     
     result = None
     

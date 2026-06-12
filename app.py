@@ -10,6 +10,23 @@ def create_app():
     # Register blueprints
     app.register_blueprint(api_bp)
     
+    @app.before_request
+    def auto_cleanup_old_files():
+        import time
+        from utils.file_store import UPLOAD_DIR, PREVIEW_DIR, OUTPUT_DIR, TEMP_DIR
+        try:
+            now = time.time()
+            for d in [UPLOAD_DIR, PREVIEW_DIR, OUTPUT_DIR, TEMP_DIR]:
+                if not d.exists(): continue
+                for file_path in d.rglob('*'):
+                    if file_path.is_file() and now - file_path.stat().st_mtime > 600:
+                        try:
+                            file_path.unlink()
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+            
     return app
 
 app = create_app()
