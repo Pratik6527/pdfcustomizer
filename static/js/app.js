@@ -679,8 +679,6 @@ document.addEventListener('DOMContentLoaded', () => {
       // ── NEW AI SETTINGS ──────────────────────────────────────
       use_ai_detection: document.getElementById('chkUseAI')?.checked ?? false,
       ai_provider: document.getElementById('selAiProvider')?.value ?? 'hybrid',
-      openai_api_key: document.getElementById('inOpenAiKey')?.value?.trim() ?? '',
-      gemini_api_key: document.getElementById('inGeminiKey')?.value?.trim() ?? '',
       protect_content_ocr: document.getElementById('chkProtectOCR')?.checked ?? true
     };
   }

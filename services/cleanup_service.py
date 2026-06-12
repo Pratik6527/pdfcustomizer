@@ -53,8 +53,7 @@ def process_single_page(src_path: str, out_path: str, settings: dict, page_num: 
     # 1. AI Detection
     ai_result = {"remove_regions": []}
     if use_ai:
-        ai_result = detect_watermarks_ai(src_path, provider, settings.get("openai_api_key", ""), settings.get("gemini_api_key", ""))
-    
+        ai_result = detect_watermarks_ai(src_path, provider)
     
     # 2. OCR Content Protection
     protected_mask = None
